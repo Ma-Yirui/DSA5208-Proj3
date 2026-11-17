@@ -1,0 +1,49 @@
+#!/bin/bash
+#PBS -P personal-e0969079
+#PBS -q auto_free
+#PBS -N e4_hybrid
+#PBS -l select=1:ncpus=32:mpiprocs=32:mem=16gb:node_pool=cpu_free
+#PBS -l walltime=01:30:00
+#PBS -j oe
+
+### E4: ranks x threads splits at a fixed core count (guidelines §6). 8192^2 grid,
+### R x T = all allocated cores for R = 1, 2, 4, ...; V0 baseline; 5 repetitions each.
+### Submit from the repo root after building:
+###   32 cores (default):  qsub jobs/e4_hybrid.pbs
+###   whole node (64):     qsub -l select=1:ncpus=64:mpiprocs=64:mem=16gb:node_pool=cpu_free jobs/e4_hybrid.pbs
+cd "$PBS_O_WORKDIR"
+[ -f scripts/job_common.sh ] || { echo "ERROR: scripts/job_common.sh missing - upload it first"; exit 1; }
+source scripts/job_common.sh
+
+NX=${NX:-8192}
+ITERS=${ITERS:-1000}
+REPS=${REPS:-5}
+OUT=${OUT:-results/raw/e4_hybrid_${NCORES}c.csv}
+csv_init "$OUT"
+
+SPLITS=""
+for R in $(pow2_upto $NCORES); do
+    [ $((NCORES % R)) -eq 0 ] && SPLITS="$SPLITS $R"
+done
+echo "== grid ${NX}^2, $ITERS iterations, ranks:$SPLITS (threads = $NCORES / ranks) -> $OUT"
+
+echo "== rank placement for each split (from a tiny run)"
+for R in $SPLITS; do
+    echo "-- $R ranks x $((NCORES / R)) threads"
+    MPI_EXTRA=--report-bindings run_mpi $R $((NCORES / R)) ./build/v3_hybrid --nx 64 --ny 64 --iters 1 2>&1 \
+        | grep -E "MCW rank" | sed -E 's/bound to .*: /: /'
+done
+
+echo "== V0 baseline"
+for rep in $(seq $REPS); do
+    ./build/v0_serial --nx $NX --ny $NX --iters $ITERS | tag | tee -a "$OUT"
+done
+
+for R in $SPLITS; do
+    T=$((NCORES / R))
+    echo "== $R ranks x $T threads"
+    for rep in $(seq $REPS); do
+        run_mpi $R $T ./build/v3_hybrid --nx $NX --ny $NX --iters $ITERS | tag | tee -a "$OUT"
+    done
+done
+echo "== done"

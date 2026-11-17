@@ -1,0 +1,20 @@
+#!/bin/bash
+#PBS -P personal-e0969079
+#PBS -q auto_free
+#PBS -N validate
+#PBS -l select=1:ncpus=16:mpiprocs=16:mem=8gb:node_pool=cpu_free
+#PBS -l walltime=00:30:00
+#PBS -j oe
+
+### Runs the full validation matrix (guidelines §4) on a Vanda compute node.
+### Submit from the repo root after building: qsub jobs/validate.pbs
+cd "$PBS_O_WORKDIR"
+[ -x build/v3_hybrid ] || { echo "Build first: source scripts/vanda_env.sh && make ARCH=sapphirerapids"; exit 1; }
+source scripts/vanda_env.sh
+module list 2>&1
+
+echo "== node: $(hostname)"
+lscpu | grep -E "Model name|^CPU\(s\)"
+
+export MPIRUN="mpirun -hostfile $PBS_NODEFILE --oversubscribe --bind-to none"
+bash scripts/validate_all.sh

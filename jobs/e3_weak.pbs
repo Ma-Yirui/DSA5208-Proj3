@@ -1,0 +1,43 @@
+#!/bin/bash
+#PBS -P personal-e0969079
+#PBS -q auto_free
+#PBS -N e3_weak
+#PBS -l select=1:ncpus=32:mpiprocs=32:mem=16gb:node_pool=cpu_free
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+### E3: weak scaling (guidelines §6). nx fixed, 512 interior rows per core, so each rank's
+### halo (one row up, one row down) stays the same size as cores are added.
+### V0 baseline at the 1-core size, V2 (ranks) and V3 (4 threads per rank); 5 repetitions each.
+### Submit from the repo root after building:
+###   32 cores (default):  qsub jobs/e3_weak.pbs
+###   whole node (64):     qsub -l select=1:ncpus=64:mpiprocs=64:mem=16gb:node_pool=cpu_free jobs/e3_weak.pbs
+cd "$PBS_O_WORKDIR"
+[ -f scripts/job_common.sh ] || { echo "ERROR: scripts/job_common.sh missing - upload it first"; exit 1; }
+source scripts/job_common.sh
+
+NX=${NX:-4096}
+ROWS=${ROWS:-512}   # interior rows per core
+ITERS=${ITERS:-2000}
+REPS=${REPS:-5}
+HT=${HT:-4}
+OUT=${OUT:-results/raw/e3_weak_${NCORES}c.csv}
+csv_init "$OUT"
+echo "== nx=$NX, $ROWS rows per core, $ITERS iterations, cores: $(pow2_upto $NCORES) -> $OUT"
+
+echo "== V0 baseline (1-core problem size)"
+for rep in $(seq $REPS); do
+    ./build/v0_serial --nx $NX --ny $((ROWS + 2)) --iters $ITERS | tag | tee -a "$OUT"
+done
+
+for P in $(pow2_upto $NCORES); do
+    NY=$((ROWS * P + 2))
+    echo "== $P cores, grid ${NX}x${NY}"
+    for rep in $(seq $REPS); do
+        run_mpi $P 1 ./build/v2_mpi --nx $NX --ny $NY --iters $ITERS | tag | tee -a "$OUT"
+        if [ $P -ge $HT ]; then
+            run_mpi $((P / HT)) $HT ./build/v3_hybrid --nx $NX --ny $NY --iters $ITERS | tag | tee -a "$OUT"
+        fi
+    done
+done
+echo "== done"

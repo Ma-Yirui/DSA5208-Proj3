@@ -1,0 +1,78 @@
+#!/bin/bash
+#PBS -P personal-e0969079
+#PBS -q auto_free
+#PBS -N e1_openmp
+#PBS -l select=1:ncpus=64:mpiprocs=1:ompthreads=64:mem=16gb:node_pool=cpu_free
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+### E1: OpenMP thread scaling on one node (guidelines §6).
+### V0 baseline + V1 with 1, 2, 4, ... up to the allocated core count, close vs spread, 5 reps.
+### Submit from the repo root after building:
+###   whole node (64 cores):  qsub jobs/e1_openmp.pbs
+###   one socket (32 cores):  qsub -l select=1:ncpus=32:mpiprocs=1:ompthreads=32:mem=16gb:node_pool=cpu_free jobs/e1_openmp.pbs
+### (qsub command-line options override the #PBS lines above.)
+cd "$PBS_O_WORKDIR"
+[ -x build/v1_openmp ] || { echo "Build first: source scripts/vanda_env.sh && make ARCH=sapphirerapids"; exit 1; }
+source scripts/vanda_env.sh
+
+echo "== node: $(hostname)   job: $PBS_JOBID"
+lscpu | grep -E "Model name|^CPU\(s\)|Socket|NUMA node"
+
+# Cores this job may use (its PBS cpuset), then OpenMP places in socket order built from them.
+# On Vanda `in` nodes CPU numbers alternate between sockets (even = socket 0, odd = socket 1),
+# so OMP_PLACES=cores would make `close` interleave the sockets.
+ALLOWED=$(numactl --show 2>/dev/null | awk '/^physcpubind:/ {for (i = 2; i <= NF; i++) print $i}')
+PLACES=""
+for node in 0 1; do
+    n=0
+    for c in $(numactl -H 2>/dev/null | awk -v k=$node '$1 == "node" && $2 == k && $3 == "cpus:" {for (i = 4; i <= NF; i++) print $i}'); do
+        if echo "$ALLOWED" | grep -qx "$c"; then PLACES="$PLACES{$c},"; n=$((n + 1)); fi
+    done
+    echo "== allocated cores on socket $node: $n"
+done
+if [ -n "$PLACES" ]; then
+    export OMP_PLACES="${PLACES%,}"
+    NCORES=$(echo "$ALLOWED" | wc -l)
+else
+    export OMP_PLACES=cores   # numactl unavailable: fall back to OS order
+    NCORES=$(nproc)
+fi
+echo "== $NCORES cores, OMP_PLACES=$OMP_PLACES"
+
+NX=${NX:-4096}
+ITERS=${ITERS:-3000}
+REPS=${REPS:-5}
+if [ -z "${THREADS:-}" ]; then
+    THREADS=""; t=1
+    while [ $t -le "$NCORES" ]; do THREADS="$THREADS $t"; t=$((t * 2)); done
+fi
+OUT=${OUT:-results/raw/e1_openmp_${NCORES}c.csv}
+mkdir -p results/raw
+echo "== threads:$THREADS -> $OUT"
+
+echo "== affinity check (4 threads)"
+for BIND in close spread; do
+    echo "-- $BIND"
+    OMP_NUM_THREADS=4 OMP_PROC_BIND=$BIND OMP_DISPLAY_AFFINITY=true \
+        OMP_AFFINITY_FORMAT="thread %n -> cpu %A" ./build/v1_openmp --nx 64 --ny 64 --iters 1 | grep thread
+done
+
+# CSV header (once) with an extra `bind` column.
+[ -s "$OUT" ] || echo "$(./build/v0_serial --nx 3 --ny 3 --iters 0 --header | head -1),bind" > "$OUT"
+
+echo "== V0 baseline"
+for rep in $(seq $REPS); do
+    ./build/v0_serial --nx $NX --ny $NX --iters $ITERS | sed 's/$/,none/' | tee -a "$OUT"
+done
+
+echo "== V1 thread sweep"
+for BIND in close spread; do
+    for T in $THREADS; do
+        for rep in $(seq $REPS); do
+            OMP_NUM_THREADS=$T OMP_PROC_BIND=$BIND ./build/v1_openmp --nx $NX --ny $NX --iters $ITERS \
+                | sed "s/\$/,$BIND/" | tee -a "$OUT"
+        done
+    done
+done
+echo "== done"

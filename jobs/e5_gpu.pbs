@@ -1,0 +1,71 @@
+#!/bin/bash
+#PBS -P personal-e0969079
+#PBS -q auto_free
+#PBS -N e5_gpu
+#PBS -l select=1:ncpus=8:ngpus=2:mpiprocs=2:mem=32gb
+#PBS -l walltime=00:30:00
+#PBS -j oe
+
+### E5: GPU experiments (guidelines §6). First validates V4 against V0 (bit-exact); the
+### benchmarks only run if validation passes.
+###   E5a  block-size sweep, 1 GPU, 8192^2
+###   E5b  grid sizes 1024^2 .. 16384^2 on 1 GPU (same total work per size)
+###   E5c  kernel / copy / MPI breakdown with 2 ranks (from the same runs as E5d)
+###   E5d  1 -> 2 GPUs: strong scaling (same grids) and weak scaling (8192^2 per GPU)
+### With only one GPU visible, the 2-rank runs share it (labelled E5c_shared).
+### Batch:        qsub jobs/e5_gpu.pbs           (1 GPU: qsub -l select=1:ncpus=4:ngpus=1:mpiprocs=2:mem=32gb jobs/e5_gpu.pbs)
+### Interactive:  bash jobs/e5_gpu.pbs           (from the repo root, inside a GPU session)
+cd "${PBS_O_WORKDIR:-.}"
+[ -x build/v4_mpi_cuda ] || { echo "Build first: source scripts/vanda_env.sh && make ARCH=sapphirerapids"; exit 1; }
+source scripts/vanda_env.sh
+
+NGPU=$(nvidia-smi -L | wc -l)
+echo "== node: $(hostname)   job: ${PBS_JOBID:-interactive}   GPUs: $NGPU"
+nvidia-smi -L
+nvidia-smi topo -m
+lscpu | grep -E "Model name"
+
+MPIRUN="mpirun --host $(hostname):4 --oversubscribe --bind-to none"
+export MPIRUN
+
+echo "== V4 validation (full log: results/validation/validate_gpu.log)"
+mkdir -p results/validation
+bash scripts/validate_gpu.sh > results/validation/validate_gpu.log 2>&1
+rc=$?
+tail -40 results/validation/validate_gpu.log
+[ $rc -eq 0 ] || { echo "GPU VALIDATION FAILED - no benchmarks run"; exit 1; }
+
+REPS=${REPS:-5}
+OUT=${OUT:-results/raw/e5_gpu.csv}
+mkdir -p results/raw
+[ -s "$OUT" ] || echo "$($MPIRUN -np 1 ./build/v4_mpi_cuda --nx 3 --ny 3 --iters 0 --header | head -1),exp,bx,by" > "$OUT"
+
+# v4 EXP RANKS NX NY ITERS BX BY: one run, result line tagged with experiment and block size.
+v4() {
+    $MPIRUN -np "$2" ./build/v4_mpi_cuda --nx "$3" --ny "$4" --iters "$5" --bx "$6" --by "$7" \
+        | sed "s/\$/,$1,$6,$7/" | tee -a "$OUT"
+}
+
+# Iterations per size keep the total work equal to 8192^2 x 2000.
+SIZES=${SIZES:-"1024:128000 2048:32000 4096:8000 8192:2000 16384:500"}
+
+echo "== E5a: block sizes (1 GPU, 8192^2)"
+for blk in "32 8" "16 16" "32 32" "64 4" "128 2" "256 1" "8 32" "4 64"; do
+    set -- $blk
+    for rep in $(seq $REPS); do v4 E5a 1 8192 8192 2000 $1 $2; done
+done
+
+echo "== E5b: grid sizes (1 GPU)"
+for s in $SIZES; do
+    for rep in $(seq $REPS); do v4 E5b 1 ${s%%:*} ${s%%:*} ${s##*:} 32 8; done
+done
+
+if [ "$NGPU" -ge 2 ]; then EXP=E5d; else EXP=E5c_shared; fi
+echo "== $EXP strong: 2 ranks, same grids (kernel / copy / MPI breakdown)"
+for s in $SIZES; do
+    for rep in $(seq $REPS); do v4 ${EXP}_strong 2 ${s%%:*} ${s%%:*} ${s##*:} 32 8; done
+done
+
+echo "== $EXP weak: 8192^2 per GPU"
+for rep in $(seq $REPS); do v4 ${EXP}_weak 2 8192 16382 2000 32 8; done
+echo "== done"

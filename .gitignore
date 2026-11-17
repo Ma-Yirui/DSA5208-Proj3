@@ -1,0 +1,9 @@
+# Track only the minimal set needed to build and run on Vanda; ignore everything else.
+/*
+!/.gitignore
+!/Makefile
+!/include/
+!/src/
+!/tools/
+!/scripts/
+!/jobs/

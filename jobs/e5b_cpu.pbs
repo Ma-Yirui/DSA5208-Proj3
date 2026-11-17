@@ -1,0 +1,39 @@
+#!/bin/bash
+#PBS -P personal-e0969079
+#PBS -q auto_free
+#PBS -N e5b_cpu
+#PBS -l select=1:ncpus=32:mpiprocs=32:mem=16gb:node_pool=cpu_free
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+### E5b CPU side: the best CPU configuration (V3, 4 threads per rank, all allocated cores) on
+### the same grid sizes and iteration counts as the GPU runs in jobs/e5_gpu.pbs; 5 repetitions.
+### Submit from the repo root after building:
+###   32 cores (default):  qsub jobs/e5b_cpu.pbs
+###   whole node (64):     qsub -l select=1:ncpus=64:mpiprocs=64:mem=16gb:node_pool=cpu_free jobs/e5b_cpu.pbs
+cd "$PBS_O_WORKDIR"
+[ -f scripts/job_common.sh ] || { echo "ERROR: scripts/job_common.sh missing - upload it first"; exit 1; }
+source scripts/job_common.sh
+
+### V1 instead of V3 (pure OpenMP, one process, no MPI):  qsub -v VER=v1 jobs/e5b_cpu.pbs
+REPS=${REPS:-5}
+HT=${HT:-4}
+VER=${VER:-v3}
+SIZES=${SIZES:-"1024:128000 2048:32000 4096:8000 8192:2000 16384:500"}
+if [ "$VER" = v1 ]; then
+    R=1; T=$NCORES; BIN=./build/v1_openmp; OUT=${OUT:-results/raw/e5b_cpu_v1_${NCORES}c.csv}
+else
+    R=$((NCORES / HT)); T=$HT; BIN=./build/v3_hybrid; OUT=${OUT:-results/raw/e5b_cpu_${NCORES}c.csv}
+fi
+csv_init "$OUT"
+echo "== $BIN with $R rank(s) x $T threads, sizes: $SIZES -> $OUT"
+
+for s in $SIZES; do
+    N=${s%%:*}
+    IT=${s##*:}
+    echo "== ${N}^2, $IT iterations"
+    for rep in $(seq $REPS); do
+        run_mpi $R $T $BIN --nx $N --ny $N --iters $IT | tag | tee -a "$OUT"
+    done
+done
+echo "== done"
